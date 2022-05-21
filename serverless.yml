@@ -1,0 +1,185 @@
+service: ms-app
+frameworkVersion: "3"
+useDotenv: true
+
+provider:
+  stage: ${opt:stage, 'development'}
+  name: aws
+  runtime: nodejs16.x
+  versionFunctions: true
+  timeout: 900
+  endpointType: private
+  tags:
+    app: ${self:service}
+    env: ${self:provider.stage}
+  stackTags:
+    app: ${self:service}
+    env: ${self:provider.stage}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:*
+          Resource: "arn:aws:dynamodb:*:*:table/${self:custom.config.AppDynamoDbTableName}"
+plugins:
+  - serverless-offline
+  - serverless-localstack
+
+custom:
+  config:
+    AppDynamoDbTableName: ${self:service}-${self:provider.stage}-AppDynamoDbTable
+  localstack:
+    stages:
+      - development
+      - dev
+      - local
+    host: http://localstack  # optional - LocalStack host to connect to
+    edgePort: 4566  # optional - LocalStack edge port to connect to
+    autostart: false  # optional - Start LocalStack in Docker on Serverless deploy
+    lambda:
+      mountCode: false
+
+resources:
+  Resources:
+    AppDynamoDB:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      Properties:
+        TableName: ${self:custom.config.AppDynamoDbTableName}
+        KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+        AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        BillingMode: PAY_PER_REQUEST
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        TableClass: STANDARD
+        TimeToLiveSpecification:
+          AttributeName: EXPIRATION_TIMESTAMP
+          Enabled: True
+        GlobalSecondaryIndexes:
+        - IndexName: GSI0
+          Projection:
+            ProjectionType: ALL
+          KeySchema:
+          - AttributeName: SK
+            KeyType: HASH
+          - AttributeName: PK
+            KeyType: RANGE
+
+    APIRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+        Policies:
+        - PolicyName: APIPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["dynamodb:GetItem"]
+                Resource: !GetAtt AppDynamoDB.Arn
+
+    ApiGatewayDeployment:
+      Type: AWS::ApiGateway::Deployment
+      DependsOn: RestApiGatewayMarketplaceRootGetMethod
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        StageName: ${self:provider.stage}
+
+    RestApiGateway:
+      Type: AWS::ApiGateway::RestApi
+      Properties:
+        Description: ${self:provider.stage}-${self:service} API Gateway
+        EndpointConfiguration:
+          Types:
+            - REGIONAL
+        Name: ${self:provider.stage}-${self:service}
+    
+    RestApiGatewayMarketplaceRootResource:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        ParentId:
+          Fn::GetAtt:
+            - RestApiGateway
+            - RootResourceId
+        PathPart: marketplace
+        RestApiId:
+          Ref: RestApiGateway
+
+    EmptyModelSchema:
+      Type: "AWS::ApiGateway::Model"
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        Description: "Empty Model"
+        Schema: |
+            {
+              "$schema": "http://json-schema.org/draft-04/schema#",
+              "title" : "Empty Schema",
+              "type" : "object"
+            }
+        ContentType: "application/json"
+
+    MarketplacePricesPostModel:
+      Type: "AWS::ApiGateway::Model"
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        Description: "Prices"
+        Schema: |
+            {
+              "$schema": "http://json-schema.org/draft-04/schema#",
+              "title" : "Marketplace Prices Schema",
+              "type" : "object",
+              "properties": {
+                "name": { "type": "string"}
+              },
+              "required": ["name"]
+            }
+        ContentType: "application/json"
+
+
+    RestApiGatewayMarketplaceRootGetMethod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        ResourceId: !Ref RestApiGatewayMarketplaceRootResource
+        HttpMethod: GET
+        AuthorizationType: "NONE"
+        Integration:
+          Type: MOCK
+
+    RestApiGatewayMarketplaceRootPostMethod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        ResourceId: !Ref RestApiGatewayMarketplaceRootResource
+        HttpMethod: POST
+        AuthorizationType: "NONE"
+        Integration:
+          Type: MOCK
+        RequestValidatorId:
+          Ref: RestApiGatewayMarketplaceRootPostRequestValidator
+        RequestModels:
+          "application/json": !Ref MarketplacePricesPostModel
+
+    RestApiGatewayMarketplaceRootPostRequestValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties: 
+        RestApiId: !Ref RestApiGateway
+        ValidateRequestBody: True
+        ValidateRequestParameters: False
