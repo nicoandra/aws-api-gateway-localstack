@@ -1,10 +1,15 @@
-service: ms-app
+service: ms-app-nics
 frameworkVersion: "3"
 useDotenv: true
 
 provider:
   stage: ${opt:stage, 'development'}
   name: aws
+  region: us-west-2
+  deploymentMethod: direct
+  deploymentBucket: 
+    name: clemence-sandbox-deployment-bucket
+  deploymentPrefix: ${self:service}-${self:provider.stage}
   runtime: nodejs16.x
   versionFunctions: true
   timeout: 900
@@ -92,15 +97,117 @@ resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: ["dynamodb:GetItem"]
+                Action: ["dynamodb:*"]
                 Resource: !GetAtt AppDynamoDB.Arn
+              - Effect: Allow
+                Action: ["apigateway:POST"]
+                Resource: 
+                  Fn::Join:
+                  - ''
+                  - - 'arn:'
+                    - !Ref AWS::Partition
+                    - ":apigateway:"
+                    - !Ref AWS::Region
+                    - ":"
+                    - !Ref AWS::AccountId
+                    - ":"
+                    - !Ref RestApiGateway
+                    - "/"
+                    - ${self:provider.stage}
+                    - "/*"
+
+    LambdaExecutionRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - lambda.amazonaws.com
+              Action:
+                - "sts:AssumeRole"
+        Path: /
+        Policies:
+          - PolicyName: root
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "logs:CreateLogGroup"
+                    - "logs:CreateLogStream"
+                    - "logs:PutLogEvents"
+                  Resource: "arn:aws:logs:*:*:*"
+                - Effect: Allow
+                  Action: ["apigateway:POST"]
+                  Resource: 
+                    Fn::Join:
+                    - ''
+                    - - 'arn:'
+                      - !Ref AWS::Partition
+                      - ":apigateway:"
+                      - !Ref AWS::Region
+                      - ":"
+                      - !Ref AWS::AccountId
+                      - ":"
+                      - !Ref RestApiGateway
+                      - "/"
+                      - ${self:provider.stage}
+                      - "/*"
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
+    EnableLatestDeploymentFunction:
+      Type: AWS::Lambda::Function
+      Properties:
+        Code:
+          ZipFile: |
+            const AWS = require('aws-sdk')
+            const apiGateway = new AWS.APIGateway()
+
+            exports.handler = async function(event, context) {
+              console.log("Event", event, "Context", context, apiGateway);
+
+              // const result = await apiGateway.createDeployment().promise();
+              
+              return {
+                Status: "SUCCESS", 
+                PhysicalResourceId: event.PhysicalResourceId,
+                StackId: event.StackId
+              }
+            }
+        Role: !GetAtt
+          - LambdaExecutionRole
+          - Arn
+        Runtime: nodejs16.x
+        Handler: index.handler
+        Timeout: 10
+        MemorySize: 128
+
+    # EnableLatestDeploymentCustomResource:
+    #   Type: AWS::CloudFormation::CustomResource
+    #   Properties:
+    #     ServiceToken: !GetAtt EnableLatestDeploymentFunction.Arn
+    #     ApiGatewayId: !Ref RestApiGateway
 
     ApiGatewayDeployment:
       Type: AWS::ApiGateway::Deployment
-      DependsOn: RestApiGatewayMarketplaceRootGetMethod
+      DependsOn:
+      - RestApiGatewayRootPostMethod
+      - RestApiGatewayProductGetMethod
       Properties:
         RestApiId: !Ref RestApiGateway
         StageName: ${self:provider.stage}
+        Description: "Should enable the app to be served"
+
+    RestApiGatewayStage:
+      Type: AWS::ApiGateway::Stage
+      Properties:
+        RestApiId: 
+          Ref: RestApiGateway
+        StageName: ${self:provider.stage}-a
+        DeploymentId:
+          Ref: ApiGatewayDeployment
 
     RestApiGateway:
       Type: AWS::ApiGateway::RestApi
@@ -111,14 +218,14 @@ resources:
             - REGIONAL
         Name: ${self:provider.stage}-${self:service}
     
-    RestApiGatewayMarketplaceRootResource:
+    RestApiGatewayRootResource:
       Type: AWS::ApiGateway::Resource
       Properties:
+        PathPart: prices
         ParentId:
           Fn::GetAtt:
             - RestApiGateway
             - RootResourceId
-        PathPart: marketplace
         RestApiId:
           Ref: RestApiGateway
 
@@ -134,8 +241,7 @@ resources:
               "type" : "object"
             }
         ContentType: "application/json"
-
-    MarketplacePricesPostModel:
+    PricesPostModel:
       Type: "AWS::ApiGateway::Model"
       Properties:
         RestApiId: !Ref RestApiGateway
@@ -143,43 +249,208 @@ resources:
         Schema: |
             {
               "$schema": "http://json-schema.org/draft-04/schema#",
-              "title" : "Marketplace Prices Schema",
+              "title" : "Prices Schema",
               "type" : "object",
-              "properties": {
-                "name": { "type": "string"}
+              "definitions": {
+                "metadata": {
+                  "type": "object",
+                  "properties": {
+                    "topic_name": {"type": "string"},
+                    "publisher": {"type": "string"},
+                    "publishing_timestamp": {"type": "integer"},
+                    "publication_timestamp": {"type": "integer"},
+                    "request_id": {"type": "string"}
+                  },
+                  "required": ["topic_name", "publisher", "publishing_timestamp", "publication_timestamp"]
+                },
+                "aggregate": {
+                  "type": "object",
+                  "properties": {
+                    "id":  {"type": "string"},
+                    "prices": {"type": "array", "items": {"$ref": "#/definitions/singlePrice"}}
+                  },
+                  "required": ["id", "prices"]
+                },
+                "singlePrice": {
+                  "type": "object",
+                  "properties": {
+                    "amount":  {"type": "number"},
+                    "currency_code":  {"type": "string"},
+                    "price_type":  {"type": "string", "enum": ["REGULAR_PRICE", "SALE_PRICE"]},
+                    "country_code": {"type": "string", "pattern": "^[A-Z]{2,2}$"}
+                  },
+                  "required": ["amount", "currency_code", "price_type","country_code"]
+                }
               },
-              "required": ["name"]
+              "properties": {
+                "metadata": { "$ref": "#/definitions/metadata"},
+                "aggregate": { "$ref": "#/definitions/aggregate"}
+              },
+              "required": ["aggregate"]
             }
         ContentType: "application/json"
 
 
-    RestApiGatewayMarketplaceRootGetMethod:
+    RestApiGatewayRootPostMethod:
       Type: AWS::ApiGateway::Method
       Properties:
         RestApiId: !Ref RestApiGateway
-        ResourceId: !Ref RestApiGatewayMarketplaceRootResource
-        HttpMethod: GET
-        AuthorizationType: "NONE"
-        Integration:
-          Type: MOCK
-
-    RestApiGatewayMarketplaceRootPostMethod:
-      Type: AWS::ApiGateway::Method
-      Properties:
-        RestApiId: !Ref RestApiGateway
-        ResourceId: !Ref RestApiGatewayMarketplaceRootResource
+        ResourceId: !Ref RestApiGatewayRootResource
         HttpMethod: POST
         AuthorizationType: "NONE"
         Integration:
-          Type: MOCK
+          Credentials:
+            Fn::GetAtt: 
+            - APIRole
+            - Arn
+          Uri: !Sub
+            - arn:aws:apigateway:${AWS::Region}:dynamodb:action/PutItem
+            - {}
+          PassthroughBehavior: "when_no_match"
+          IntegrationHttpMethod: POST
+          Type: AWS
+          RequestTemplates:
+            application/json:
+              Fn::Sub: 
+                - |-
+                  { 
+                    "TableName": "${tableName}",
+                    "Item": {
+                            "PK": { "S": "PRICES#${productCode}" },
+                            "SK": { "S": "PRICES#${payloadTimestamp}" },
+                            "METADATA": { "S": "${metadata}"},
+                            "AGGREGATE": { "S": "${aggregate}"},
+                            "PAYLOAD": { "S": "${payload}" },
+                            "PUBLICATION_TIMESTAMP": { "N": "${payloadTimestamp}" },
+                            "RECEIVED_TIMESTAMP": { "N": "${currentTimestamp}" }
+                          },
+                    "ConditionExpression": "(attribute_not_exists(PUBLICATION_TIMESTAMP) or PUBLICATION_TIMESTAMP <= :payloadTimestamp) and (:currentTimestamp > :payloadTimestamp)",
+                    "ExpressionAttributeValues": {
+                      ":payloadTimestamp": {"N": "${payloadTimestamp}"},
+                      ":currentTimestamp": {"N": "${currentTimestamp}"}
+                    }
+                  }
+                - { 
+                    tableName: { Ref: AppDynamoDB }, 
+                    productCode: "$util.escapeJavaScript($input.path('$.aggregate.id'))", 
+                    payload: "$util.escapeJavaScript($input.body)",
+                    metadata: "$util.escapeJavaScript($input.json('$.metadata'))",
+                    aggregate: "$util.escapeJavaScript($input.json('$.aggregate'))",
+                    currentTimestamp: "$context.requestTimeEpoch",
+                    payloadTimestamp: "$util.escapeJavaScript($input.path('$.metadata.publication_timestamp'))",
+                  }
+          IntegrationResponses:
+          - StatusCode: 200
+            SelectionPattern: 2\d{2}
+            ResponseParameters: {}
+            ResponseTemplates: 
+              application/json: |
+                {"status": "200"}
+          - StatusCode: 400
+            SelectionPattern: 4\d{2}
+            ResponseParameters: {}
+            ResponseTemplates: 
+              application/json: |
+                {"status": "400"}
         RequestValidatorId:
-          Ref: RestApiGatewayMarketplaceRootPostRequestValidator
+          Ref: RestApiGatewayRootPostRequestValidator
         RequestModels:
-          "application/json": !Ref MarketplacePricesPostModel
-
-    RestApiGatewayMarketplaceRootPostRequestValidator:
+          "application/json": !Ref PricesPostModel
+        MethodResponses:
+        - ResponseParameters:
+          ResponseModels: {}
+          StatusCode: 200
+        - ResponseParameters: {}
+          ResponseModels: {}
+          StatusCode: 400
+        - ResponseParameters: {}
+          ResponseModels: {}
+          StatusCode: 500
+    RestApiGatewayRootPostRequestValidator:
       Type: AWS::ApiGateway::RequestValidator
       Properties: 
         RestApiId: !Ref RestApiGateway
         ValidateRequestBody: True
         ValidateRequestParameters: False
+    
+    RestApiGatewayProductCodeResource:
+      Type: AWS::ApiGateway::Resource
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        ParentId: !Ref RestApiGatewayRootResource
+        PathPart: "{productCode+}"
+
+    RestApiGatewayProductGetMethod:
+      Type: AWS::ApiGateway::Method
+      Properties:
+        RestApiId: !Ref RestApiGateway
+        ResourceId: !Ref RestApiGatewayProductCodeResource
+        HttpMethod: GET
+        AuthorizationType: "NONE"
+        Integration:
+          Credentials:
+            Fn::GetAtt: 
+            - APIRole
+            - Arn
+          Uri: !Sub
+            - arn:aws:apigateway:${AWS::Region}:dynamodb:action/Query
+            - {}
+          PassthroughBehavior: "when_no_match"
+          IntegrationHttpMethod: POST
+          Type: AWS
+          RequestTemplates:
+            application/json:
+              Fn::Sub: 
+                - |-
+                  { 
+                    "ConsistentRead": true,
+                    "TableName": "${tableName}",
+                    "ScanIndexForward": false,
+                    "KeyConditionExpression": "PK = :keyParam",
+                    "ExpressionAttributeValues": {
+                      ":keyParam": { "S": "PRICES#${productCode}"}
+                    }
+                  }
+                - { 
+                    tableName: { Ref: AppDynamoDB }, 
+                    productCode: "$util.escapeJavaScript($input.params('productCode'))"
+                  }
+          IntegrationResponses:
+          - StatusCode: 200
+            SelectionPattern: 2\d{2}
+            ResponseParameters: {}
+            ResponseTemplates: 
+              application/json: |
+                #set($inputRoot = $input.path('$'))
+                #set($count = $input.path('$.Count'))
+                {
+                  "count": $count,
+                  "items": [
+                    #foreach($item in $inputRoot.Items)
+                    {
+                      "aggregate": $item.AGGREGATE.S, 
+                      "metadata": $item.METADATA.S, 
+                      "timeline": {"received_by_pricing_at": $item.RECEIVED_TIMESTAMP.N}
+                    }
+                    #if($foreach.hasNext),#end
+                    #end
+                  ]
+                }
+
+              
+          - StatusCode: 400
+            SelectionPattern: 4\d{2}
+            ResponseParameters: {}
+            ResponseTemplates: 
+              application/json: |
+                {"status": "400"}
+        MethodResponses:
+        - ResponseParameters:
+          ResponseModels: {}
+          StatusCode: 200
+        - ResponseParameters: {}
+          ResponseModels: {}
+          StatusCode: 400
+        - ResponseParameters: {}
+          ResponseModels: {}
+          StatusCode: 500
