@@ -159,85 +159,44 @@ resources:
       Properties:
         Code:
           ZipFile: |
+            const url = require('url');
+            const https = require("https");
             const AWS = require('aws-sdk')
             const apiGateway = new AWS.APIGateway()
-            const responseData = {}
 
-            exports.handler = async function (event, context) {
-              console.log("REQUEST RECEIVED:\n" + JSON.stringify(event));
-              var responseData = {};
-              var myOutArray = [];
-              var awsAccountId = context.invokedFunctionArn.split(":")[4];
-              let gatewayDeployment = null
-              
-              if(event.RequestType !== 'Delete') {
-                console.log("Creating deployment...")
-                gatewayDeployment = await apiGateway.createDeployment({
-                  restApiId: event.ResourceProperties.ApiGatewayId, stageName: event.ResourceProperties.ApiGatewayStageId, description: "Created from CustomResource"
-                }).promise().catch((err) => {
-                  console.error("Can not create deployment", err)
-                  return err;
-                });
+            const response = require('cfn-response');
+            exports.handler = (event, context) => {
+              console.log("Event", event, "Context", context);
+
+              if (event.RequestType === "Delete") {
+                const responseData = {operation: "Deletion, always success"}
+                response.send(event, context, response.SUCCESS, responseData);
+                return
               }
-              responseData["apiGatewayDeployment"] = JSON.stringify(gatewayDeployment);
-              sendResponse(event, context, "SUCCESS", responseData);
+
+              const input = event.ResourceProperties;
+
+              const deploymentCreationParams = {
+                restApiId: input.ApiGatewayId, 
+                stageName: input.ApiGatewayStageId, 
+                description: "Created by the Custom Resource"
+              }
+              
+              // const apiGatewayDeploymentCreationResult = await apiGateway.createDeployment(deploymentCreationParams).promise().catch(err => err)
+              const apiGatewayDeploymentCreationResult = "created"
+              console.log("Binding deployment", apiGatewayDeploymentCreationResult)
+              const responseData = {Operation: "working", apiGatewayDeploymentCreationResult, ...deploymentCreationParams};
+              response.send(event, context, response.SUCCESS, responseData);
+              console.log("All done")
+              return
             };
 
-            function sendResponse(event, context, responseStatus, responseData) {
-              var responseBody = JSON.stringify({
-                Status: responseStatus,
-                Data: responseData,
-                Reason: "See the details in CloudWatch Log Stream: " + context.logStreamName,
-                ...event
-              });
-
-              console.log("RESPONSE BODY:\n", responseBody);
-
-              var https = require("https");
-              var url = require("url");
-
-              var parsedUrl = url.parse(event.ResponseURL);
-              var options = {
-                hostname: parsedUrl.hostname,
-                port: 443,
-                path: parsedUrl.path,
-                method: "PUT",
-                headers: {
-                  "content-type": "",
-                  "content-length": responseBody.length,
-                },
-              };
-
-              console.log("SENDING RESPONSE...\n");
-
-              var request = https.request(options, function (response) {
-                response.on('data', (d) => {
-                    console.log("data", d);
-                });
-
-                console.log("STATUS: " + response.statusCode);
-                console.log("HEADERS: " + JSON.stringify(response.headers));
-                // Tell AWS Lambda that the function execution is done
-                context.done();
-              });
-
-  
-              request.on("error", function (error) {
-                console.error("ERROR IN SENDRESPONSE Error:", error);
-                // Tell AWS Lambda that the function execution is done
-                context.done();
-              });
-
-              // write data to request body
-              request.write(responseBody);
-              request.end();
-            }
         Role: !GetAtt
           - LambdaExecutionRole
           - Arn
         Runtime: nodejs16.x
         Handler: index.handler
-        Timeout: 10
+        Timeout: 20
         MemorySize: 128
 
     # EnableLatestDeploymentCustomResource:
@@ -481,7 +440,7 @@ resources:
                 #set($count = $input.path('$.Count'))
                 {
                   "count": $count,
-                  "itemsBus": [
+                  "items": [
                     #foreach($item in $inputRoot.Items)
                     {
                       "aggregate": $item.AGGREGATE.S, 

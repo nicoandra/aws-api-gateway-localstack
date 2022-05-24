@@ -23,3 +23,5 @@ References:
 * https://gist.github.com/narenranjit/1672345
 * https://www.tabnine.com/code/javascript/functions/aws-sdk/APIGateway
 * https://aws.amazon.com/premiumsupport/knowledge-center/cloudformation-lambda-resource-delete/
+* https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/crpg-ref-requests.html
+* https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/crpg-ref-responses.html
