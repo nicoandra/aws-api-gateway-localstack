@@ -232,7 +232,27 @@ resources:
           Types:
             - REGIONAL
         Name: ${self:provider.stage}-${self:service}
-    
+
+    BadRequestParametersResponse:
+      Type: 'AWS::ApiGateway::GatewayResponse'
+      Properties:
+        RestApiId: 
+          Ref: 'RestApiGateway'
+        ResponseType: BAD_REQUEST_PARAMETERS
+        ResponseTemplates:
+          application/json: "{\"success\":false,\"message\":\"Invalid Parameters: $context.error.validationErrorString\"}"
+        StatusCode: '400'
+
+    BadRequestBodyResponse:
+      Type: 'AWS::ApiGateway::GatewayResponse'
+      Properties:
+        RestApiId: 
+          Ref: 'RestApiGateway'
+        ResponseType: BAD_REQUEST_BODY
+        ResponseTemplates:
+          application/json: "{\"success\":false,\"message\":\"Invalid Body: $context.error.validationErrorString\"}"
+        StatusCode: '400'
+
     RestApiGatewayRootResource:
       Type: AWS::ApiGateway::Resource
       Properties:
@@ -305,7 +325,6 @@ resources:
             }
         ContentType: "application/json"
 
-
     RestApiGatewayRootPostMethod:
       Type: AWS::ApiGateway::Method
       Properties:
@@ -366,7 +385,11 @@ resources:
             ResponseParameters: {}
             ResponseTemplates: 
               application/json: |
-                {"status": "400"}
+                #set($message = $input.path('$.message'))
+                #if($message == "The conditional request failed")
+                  #set($message = "Timestamp Validation Failed. The original request contains a publication_timestamp / publishing_timestamp of the future.")
+                #end
+                {"status": "400", "error: "$util.escapeJavaScript($message)"}
         RequestValidatorId:
           Ref: RestApiGatewayRootPostRequestValidator
         RequestModels:
