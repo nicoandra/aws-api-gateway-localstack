@@ -1,0 +1,14 @@
+deploymentBucket:
+  name: clemence-sandbox-deployment-bucket
+
+
+network:
+  vpcEndpointId: vpce-03ea1fc3859a0ad8d
+  subnetIds:
+    - subnet-0dfd2ed029a0d6e6c
+    - subnet-0f2d6fa12de465cec
+  securityGroupIds:
+    - sg-0498123cb845772df
+
+
+AppDynamoDbTableName: ${self:service}-${self:provider.stage}-AppDynamoDbTable

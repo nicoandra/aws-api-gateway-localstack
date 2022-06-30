@@ -8,3 +8,6 @@ COPY . .
 FROM base as production
 ENV NODE_PATH=./build
 RUN npm run build
+
+FROM base as development
+RUN apt update && apt-get install python3-pip groff -y && pip3 install awscli awscli-local

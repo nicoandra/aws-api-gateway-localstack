@@ -5,7 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: base
+      target: development
+    env_file: './.env.dev'
     volumes:
       - ./:/home/app
     expose:
@@ -16,7 +17,7 @@ services:
     command: npm run dev
 
   localstack:
-    image: localstack/localstack:0.14.3
+    image: localstack/localstack:0.14.4
     # ports:
     # - "4566:4566"
     env_file: ./localstack.env

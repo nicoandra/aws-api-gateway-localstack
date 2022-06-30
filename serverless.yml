@@ -5,15 +5,12 @@ useDotenv: true
 provider:
   stage: ${opt:stage, 'development'}
   name: aws
-  region: us-west-2
+  region: ${env:AWS_DEFAULT_REGION, 'us-west-2'}
   deploymentMethod: direct
-  deploymentBucket: 
-    name: clemence-sandbox-deployment-bucket
   deploymentPrefix: ${self:service}-${self:provider.stage}
   runtime: nodejs16.x
   versionFunctions: true
   timeout: 900
-  endpointType: private
   tags:
     app: ${self:service}
     env: ${self:provider.stage}
@@ -27,13 +24,42 @@ provider:
           Action:
             - dynamodb:*
           Resource: "arn:aws:dynamodb:*:*:table/${self:custom.config.AppDynamoDbTableName}"
+  deploymentBucket:
+    name: ${self:custom.config.deploymentBucket.name}
+  endpointType: EDGE
+  # endpointType: PRIVATE
+  # vpcEndpointIds:
+  #   - ${self:custom.config.network.vpcEndpointId}
+  # vpc:
+  #   securityGroupIds: ${self:custom.config.network.securityGroupIds}
+  #   subnetIds: ${self:custom.config.network.subnetIds}
+  apiGateway:
+    minimumCompressionSize: 1024
+    shouldStartNameWithService: true
+    resourcePolicy:
+      - Effect: Allow
+        Principal: "*"
+        Action: execute-api:Invoke
+        Resource: "execute-api:/*"
+        # Condition:
+        #   StringEquals:
+        #     "aws:sourceVpce": ${self:custom.config.network.vpcEndpointId}
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+
+
 plugins:
   - serverless-offline
   - serverless-localstack
+  - serverless-deployment-bucket
+  - serverless-plugin-log-retention # Used for log retention of Lambda functions
+
 
 custom:
-  config:
-    AppDynamoDbTableName: ${self:service}-${self:provider.stage}-AppDynamoDbTable
+  config: ${file(./serverless-${self:provider.stage}.yml)}
+  logRetentionInDays: 7 # For Lambda functions only, see serverless-plugin-log-retention
   localstack:
     stages:
       - development
@@ -44,6 +70,14 @@ custom:
     autostart: false  # optional - Start LocalStack in Docker on Serverless deploy
     lambda:
       mountCode: false
+
+functions:
+  api:
+    handler: src/index.handler
+    memorySize: 4096
+    timeout: 30
+    events:
+      - http: ANY /sample
 
 resources:
   Resources:
@@ -111,7 +145,7 @@ resources:
                     - ":"
                     - !Ref AWS::AccountId
                     - ":"
-                    - !Ref RestApiGateway
+                    - !Ref ApiGatewayRestApi
                     - "/"
                     - ${self:provider.stage}
                     - "/*"
@@ -150,107 +184,18 @@ resources:
                       - ":apigateway:"
                       - !Ref AWS::Region
                       - "::/restapis/"
-                      - !Ref RestApiGateway
+                      - !Ref ApiGatewayRestApi
                       - "/deployments"
 
-    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-function.html
-    EnableLatestDeploymentFunction:
-      Type: AWS::Lambda::Function
+
+
+    BadRequestResponse:
+      Type: AWS::ApiGateway::GatewayResponse
       Properties:
-        Code:
-          ZipFile: |
-            const url = require('url');
-            const https = require("https");
-            const AWS = require('aws-sdk')
-            const apiGateway = new AWS.APIGateway()
-
-            const response = require('cfn-response');
-            exports.handler = (event, context) => {
-              console.log("Event", event, "Context", context);
-
-              if (event.RequestType === "Delete") {
-                const responseData = {operation: "Deletion, always success"}
-                response.send(event, context, response.SUCCESS, responseData);
-                return
-              }
-
-              const input = event.ResourceProperties;
-
-              const deploymentCreationParams = {
-                restApiId: input.ApiGatewayId, 
-                stageName: input.ApiGatewayStageId, 
-                description: "Created by the Custom Resource"
-              }
-              
-              // const apiGatewayDeploymentCreationResult = await apiGateway.createDeployment(deploymentCreationParams).promise().catch(err => err)
-              const apiGatewayDeploymentCreationResult = "created"
-              console.log("Binding deployment", apiGatewayDeploymentCreationResult)
-              const responseData = {Operation: "working", apiGatewayDeploymentCreationResult, ...deploymentCreationParams};
-              response.send(event, context, response.SUCCESS, responseData);
-              console.log("All done")
-              return
-            };
-
-        Role: !GetAtt
-          - LambdaExecutionRole
-          - Arn
-        Runtime: nodejs16.x
-        Handler: index.handler
-        Timeout: 20
-        MemorySize: 128
-
-    # EnableLatestDeploymentCustomResource:
-    #   Type: AWS::CloudFormation::CustomResource
-    #   Properties:
-    #     ServiceToken: !GetAtt EnableLatestDeploymentFunction.Arn
-    #     ApiGatewayId: !Ref RestApiGateway
-    #     ApiGatewayStageId: !Ref RestApiGatewayStage
-
-    ApiGatewayDeployment:
-      Type: AWS::ApiGateway::Deployment
-      DependsOn:
-      - RestApiGatewayRootPostMethod
-      - RestApiGatewayProductGetMethod
-      Properties:
-        RestApiId: !Ref RestApiGateway
-        Description: "Created from Serverless"
-
-    RestApiGatewayStage:
-      Type: AWS::ApiGateway::Stage
-      Properties:
-        RestApiId: 
-          Ref: RestApiGateway
-        StageName: autodeploy
-        DeploymentId:
-          Ref: ApiGatewayDeployment
-
-    RestApiGateway:
-      Type: AWS::ApiGateway::RestApi
-      Properties:
-        Description: ${self:provider.stage}-${self:service} API Gateway
-        EndpointConfiguration:
-          Types:
-            - REGIONAL
-        Name: ${self:provider.stage}-${self:service}
-
-    BadRequestParametersResponse:
-      Type: 'AWS::ApiGateway::GatewayResponse'
-      Properties:
-        RestApiId: 
-          Ref: 'RestApiGateway'
-        ResponseType: BAD_REQUEST_PARAMETERS
+        RestApiId: !Ref ApiGatewayRestApi
+        ResponseType: DEFAULT_4XX
         ResponseTemplates:
-          application/json: "{\"success\":false,\"message\":\"Invalid Parameters: $context.error.validationErrorString\"}"
-        StatusCode: '400'
-
-    BadRequestBodyResponse:
-      Type: 'AWS::ApiGateway::GatewayResponse'
-      Properties:
-        RestApiId: 
-          Ref: 'RestApiGateway'
-        ResponseType: BAD_REQUEST_BODY
-        ResponseTemplates:
-          application/json: "{\"success\":false,\"message\":\"Invalid Body: $context.error.validationErrorString\"}"
+          application/json: "{\"success\":false,\"message\":\"$context.error.validationErrorString\"}"
         StatusCode: '400'
 
     RestApiGatewayRootResource:
@@ -259,15 +204,15 @@ resources:
         PathPart: prices
         ParentId:
           Fn::GetAtt:
-            - RestApiGateway
+            - ApiGatewayRestApi
             - RootResourceId
         RestApiId:
-          Ref: RestApiGateway
+          Ref: ApiGatewayRestApi
 
     EmptyModelSchema:
       Type: "AWS::ApiGateway::Model"
       Properties:
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         Description: "Empty Model"
         Schema: |
             {
@@ -279,7 +224,7 @@ resources:
     PricesPostModel:
       Type: "AWS::ApiGateway::Model"
       Properties:
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         Description: "Prices"
         Schema: |
             {
@@ -328,7 +273,7 @@ resources:
     RestApiGatewayRootPostMethod:
       Type: AWS::ApiGateway::Method
       Properties:
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         ResourceId: !Ref RestApiGatewayRootResource
         HttpMethod: POST
         AuthorizationType: "NONE"
@@ -404,24 +349,25 @@ resources:
         - ResponseParameters: {}
           ResponseModels: {}
           StatusCode: 500
+
     RestApiGatewayRootPostRequestValidator:
       Type: AWS::ApiGateway::RequestValidator
       Properties: 
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         ValidateRequestBody: True
         ValidateRequestParameters: False
     
     RestApiGatewayProductCodeResource:
       Type: AWS::ApiGateway::Resource
       Properties:
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         ParentId: !Ref RestApiGatewayRootResource
         PathPart: "{productCode+}"
 
     RestApiGatewayProductGetMethod:
       Type: AWS::ApiGateway::Method
       Properties:
-        RestApiId: !Ref RestApiGateway
+        RestApiId: !Ref ApiGatewayRestApi
         ResourceId: !Ref RestApiGatewayProductCodeResource
         HttpMethod: GET
         AuthorizationType: "NONE"
